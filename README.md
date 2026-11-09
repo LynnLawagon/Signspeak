@@ -51,10 +51,10 @@ python web_app.py
 2. In Render, choose **New + → Web Service** and connect the repository.
 3. Set:
    - **Build command:** `pip install -r requirements.txt`
-   - **Start command:** `gunicorn --workers 1 --threads 1 --timeout 120 web_app:app`
+   - **Start command:** `gunicorn --workers 1 --threads 2 --timeout 300 --graceful-timeout 30 web_app:app`
 4. Deploy, then open the HTTPS URL and allow camera access.
 
-The `Procfile` is included for platforms that use it. The service is configured with one worker because the hand detector and model objects are loaded once and shared by requests.
+The `Procfile` is included for platforms that use it. The service uses one worker because the hand detector and model objects are loaded once and shared by requests. Two request threads are protected by a lock during inference. The 300-second timeout allows slower CPU-only startup/inference; if the host kills the process for memory use, use a larger instance.
 
 ## Important deployment notes
 

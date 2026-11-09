@@ -1,5 +1,11 @@
 import os
+import base64
 import threading
+
+# Keep TensorFlow quiet on CPU-only hosting and avoid trying to initialize CUDA.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
 import cv2
 import numpy as np
 from flask import Flask, jsonify, render_template, request
@@ -23,7 +29,11 @@ def read_labels(path):
     return labels
 
 app = Flask(__name__)
-detector = HandDetector(maxHands=2)
+app.config["MAX_CONTENT_LENGTH"] = 3 * 1024 * 1024
+
+# Models are loaded once when the service starts. Do not create a new model
+# for every camera frame; that would use much more memory.
+detector = HandDetector(maxHands=1)
 classifiers = {}
 labels_by_mode = {}
 
@@ -37,6 +47,8 @@ for mode, (model_path, labels_path) in MODEL_DIRS.items():
 
 OFFSET = 20
 IMAGE_SIZE = 300
+# cvzone's detector and TensorFlow models are shared objects. Serialize access
+# so two requests cannot use them at the same time.
 prediction_lock = threading.Lock()
 
 def prepare_hand_image(frame, bbox):
@@ -72,7 +84,11 @@ def index():
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "models": list(classifiers.keys())})
+    return jsonify({
+        "status": "ok",
+        "models": list(classifiers.keys()),
+        "model_count": len(classifiers)
+    })
 
 @app.post("/predict")
 def predict():
@@ -85,11 +101,9 @@ def predict():
     if not image_data:
         return jsonify({"error": "No camera frame was received."}), 400
 
-    # Browser sends a data URL: data:image/jpeg;base64,...
-    import base64
     try:
         encoded = image_data.split(",", 1)[-1]
-        raw = base64.b64decode(encoded)
+        raw = base64.b64decode(encoded, validate=True)
         frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
     except Exception:
         frame = None
@@ -97,30 +111,55 @@ def predict():
     if frame is None:
         return jsonify({"error": "The camera frame could not be read."}), 400
 
+    # Keep inference lightweight on small CPU hosting instances.
+    if frame.shape[1] > 480:
+        new_height = max(1, int(frame.shape[0] * 480 / frame.shape[1]))
+        frame = cv2.resize(frame, (480, new_height), interpolation=cv2.INTER_AREA)
+
     # Match the original desktop app's mirrored-camera behavior.
     frame = cv2.flip(frame, 1)
+
     with prediction_lock:
         hands, _ = detector.findHands(frame, draw=False)
         if not hands:
-            return jsonify({"detected": False, "message": "Show one hand inside the camera."})
+            return jsonify({
+                "detected": False,
+                "message": "Show one hand inside the camera."
+            })
 
-        hand_image = prepare_hand_image(frame, hands[0]["bbox"])
+        hand = hands[0]
+        bbox = [int(v) for v in hand["bbox"]]
+        hand_image = prepare_hand_image(frame, bbox)
         if hand_image is None:
-            return jsonify({"detected": False, "message": "Move your hand fully into view."})
+            return jsonify({
+                "detected": False,
+                "message": "Move your hand fully into view."
+            })
 
         prediction, index = classifiers[mode].getPrediction(hand_image, draw=False)
+
     labels = labels_by_mode[mode]
     if index < 0 or index >= len(labels):
-        return jsonify({"detected": False, "message": "Could not classify this sign."})
+        return jsonify({
+            "detected": False,
+            "message": "Could not classify this sign."
+        })
 
     confidence = float(prediction[index]) if len(prediction) > index else 0.0
     return jsonify({
         "detected": True,
         "label": labels[index],
         "confidence": round(confidence * 100, 1),
-        "mode": mode
+        "mode": mode,
+        "bbox": bbox,
+        "frame_width": int(frame.shape[1]),
+        "frame_height": int(frame.shape[0])
     })
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify({"error": "Camera frame is too large. Please try again."}), 413
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
