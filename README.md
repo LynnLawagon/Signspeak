@@ -7,43 +7,38 @@ A browser-based website for the existing Python + Teachable Machine sign-recogni
 - **Alphabet model:** A–Z (26 classes)
 - **Number model:** 1–5 (5 classes)
 - **Common words model:** 20 trained classes
-- **Frontend:** HTML, CSS, and JavaScript
-- **Backend:** Python, Flask, OpenCV, cvzone, and the original Teachable Machine `.h5` models
+- **Frontend:** HTML, CSS, JavaScript, TensorFlow.js and MediaPipe Hands (all self-hosted in `static/vendor`)
+- **Backend:** a tiny Flask server that only serves the page and files
 
-The trained model files and the original desktop scripts (`test.py` and `datacollection.py`) are kept in the project. The website uses `web_app.py`; it does not replace or retrain the models.
+The original Keras models (`*/keras_model.h5`) and the desktop scripts (`test.py`, `datacollection.py`) are kept
+unchanged. The website uses copies of the same models converted to TensorFlow.js (`static/models/`).
 
-## Run locally (Python 3.10)
+## How it works
 
-TensorFlow 2.10 is used by the original project and requires a compatible Python environment. Use Python 3.10.
+Everything heavy now happens in the visitor's browser:
 
-### Windows PowerShell
+1. **MediaPipe Hands** (the same hand model cvzone uses) tracks the hand and draws the live bounding box.
+2. The hand is cropped exactly like `datacollection.py` / `test.py` do it: mirrored frame, hand skeleton and pink box
+   drawn on the frame, 20 px offset, hand centred on a 300×300 white square. **This matters** – the models were trained
+   on images that had the skeleton drawn on them, so clean crops are recognised poorly.
+3. **TensorFlow.js** runs the converted Teachable Machine model for the selected category.
+4. The last 5 predictions are averaged so the label does not flicker.
 
-```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
-python web_app.py
-```
+Because the server no longer runs TensorFlow, OpenCV or MediaPipe, it starts in about a second, needs very little
+memory, and works on Render's free plan.
 
-Open http://127.0.0.1:5000 in your browser. Allow camera access.
-
-If PowerShell blocks activation, run:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-### macOS / Linux
+## Run locally
 
 ```bash
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
+python -m venv .venv
+# Windows: .\.venv\Scripts\Activate.ps1      macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 python web_app.py
 ```
+
+Open http://127.0.0.1:5000 and allow camera access. Any Python 3.9+ works for the website.
+
+The original desktop scripts still need Python 3.10 and `pip install -r requirements-desktop.txt`.
 
 ## Deploy to Render
 
@@ -51,45 +46,43 @@ python web_app.py
 2. In Render, choose **New + → Web Service** and connect the repository.
 3. Set:
    - **Build command:** `pip install -r requirements.txt`
-   - **Start command:** `gunicorn --workers 1 --threads 2 --timeout 300 --graceful-timeout 30 web_app:app`
-4. Deploy, then open the HTTPS URL and allow camera access.
+   - **Start command:** `gunicorn --workers 1 --threads 4 --timeout 120 web_app:app`
+4. Deploy, open the HTTPS URL and allow camera access.
 
-The `Procfile` is included for platforms that use it. The service uses one worker because the hand detector and model objects are loaded once and shared by requests. Two request threads are protected by a lock during inference. The 300-second timeout allows slower CPU-only startup/inference; if the host kills the process for memory use, use a larger instance.
+The first visit downloads about 15–20 MB (hand detector + models). They are cached afterwards.
+Camera access requires HTTPS (Render provides it) or localhost.
 
-## Important deployment notes
+Check `/health` – it should report `status: ok` and list `words`, `letters` and `numbers`.
 
-- Camera access in browsers requires HTTPS (or localhost during local development).
-- The Python backend receives camera frames and runs hand detection + classification. This means the server needs enough memory and CPU for TensorFlow and MediaPipe. A small free hosting instance may run slowly or may not have enough memory; use a plan with adequate RAM/CPU if deployment fails or predictions are delayed.
-- Do not deploy this backend as a static-only site (such as a plain Netlify static site). The Python API and model files must run on a Python server.
-- The project recognizes individual signs, not continuous signed sentences. Predictions can be wrong; lighting, camera angle, hand position, and training data affect results.
-- The model labels include an offensive gesture. It is retained because it is part of the existing trained model, not added by the website.
+## Re-exporting the models (only if you retrain)
+
+If you retrain in Teachable Machine and export a new Keras `.h5`, convert it for the browser with
+`tensorflowjs` (e.g. `tensorflowjs_converter --input_format keras keras_model.h5 static/models/<mode>/`) and update
+`static/models/labels.json`. Alternatively, export the **TensorFlow.js** option from Teachable Machine directly.
+
+## Notes
+
+- The project recognizes individual signs, not continuous signed sentences. Lighting, camera angle, hand position and
+  training data all affect accuracy.
+- The word model includes an offensive gesture. It is retained because it is part of the existing trained model; the
+  bounding box turns red when it is detected.
 
 ## Project structure
 
 ```text
 Sign-language/
-├── allLetters/
-│   ├── keras_model.h5
-│   └── labels.txt
-├── converted_keras/
-│   ├── keras_model.h5
-│   └── labels.txt
-├── numbers_converted_keras/
-│   ├── keras_model.h5
-│   └── labels.txt
-├── templates/
-│   └── index.html
+├── allLetters/ converted_keras/ numbers_converted_keras/   # original Keras models (desktop scripts)
 ├── static/
-│   ├── app.js
-│   └── styles.css
-├── web_app.py
-├── test.py                 # Original desktop recognition program
-├── datacollection.py       # Original data collection program
-├── requirements.txt
+│   ├── app.js            # camera, hand tracking, preprocessing, prediction, bounding box
+│   ├── styles.css
+│   ├── models/           # TensorFlow.js models + labels.json (used by the website)
+│   └── vendor/           # tf.min.js and MediaPipe Hands (self-hosted, no CDN)
+├── templates/index.html
+├── web_app.py            # Flask: serves the page + /health
+├── test.py, datacollection.py   # original desktop programs
+├── requirements.txt            # website (Flask + gunicorn)
+├── requirements-desktop.txt    # only for the desktop scripts
+├── RENDER-START-COMMAND.txt
 ├── .python-version
 └── Procfile
 ```
-
-## API check
-
-After starting the server, visit `/health`. It should return `status: ok` and list all three model modes.

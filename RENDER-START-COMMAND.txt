@@ -1,5 +1,7 @@
-Set this exact Start Command in Render > Settings > Build & Deploy:
+Render > Settings > Build & Deploy
 
-gunicorn --workers 1 --threads 2 --timeout 300 --graceful-timeout 30 web_app:app
+Build Command:   pip install -r requirements.txt
+Start Command:   gunicorn --workers 1 --threads 4 --timeout 120 web_app:app
 
 Then save and deploy the latest commit.
+(TensorFlow/MediaPipe are no longer needed on the server, so the old 300-second timeout is gone.)
